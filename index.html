@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>바운스볼 클래식 비주얼 맵 에디터</title>
+    <!-- Gzip 압축/해제를 위한 pako 라이브러리 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #eeeeee;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { color: #4CAF50; font-size: 1.5rem; margin-top: 0; }
+        h2 { color: #81C784; font-size: 1.1rem; margin-bottom: 10px; }
+        
+        .main-layout {
+            display: grid;
+            grid-template-columns: 320px 1fr 340px;
+            gap: 15px;
+            align-items: start;
+        }
+
+        .panel {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #3d3d3d;
+        }
+
+        textarea {
+            width: 100%;
+            height: 100px;
+            background: #111111;
+            color: #00FF66;
+            border: 1px solid #444444;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            padding: 8px;
+            resize: vertical;
+        }
+
+        button {
+            width: 100%;
+            background: #2E7D32;
+            color: white;
+            border: none;
+            padding: 10px;
+            margin: 5px 0 12px 0;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button:hover { background: #388E3C; }
+        button.action-btn { background: #1565C0; }
+        button.action-btn:hover { background: #1976D2; }
+
+        .palette-container {
+            max-height: 500px;
+            overflow-y: auto;
+            border: 1px solid #444;
+            background: #111;
+            border-radius: 4px;
+        }
+        #paletteCanvas { display: block; cursor: pointer; }
+
+        .editor-container {
+            overflow: auto;
+            background: #050505;
+            border: 2px solid #4CAF50;
+            border-radius: 4px;
+            max-height: 80vh;
+        }
+        #mapCanvas { display: block; cursor: crosshair; }
+
+        .status-box {
+            background: #111;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .selected-preview {
+            width: 32px;
+            height: 32px;
+            border: 1px solid #FFF;
+            background: #222;
+            display: inline-block;
+        }
+
+        .info-text { font-size: 0.8rem; color: #aaa; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <h1>🎮 바운스볼 클래식 비주얼 맵 에디터</h1>
+
+    <div class="main-layout">
+        <!-- 1. 데이터 변환 패널 -->
+        <div class="panel">
+            <h2>1. 데이터 변환 (MT Manager)</h2>
+            <label style="font-size:0.85rem; color:#ccc;">Base64 암호화 맵 데이터:</label>
+            <textarea id="base64Input" placeholder="H4sIAAAAAAAACu1QQQoAIAxy/6v/..."></textarea>
+            <button class="action-btn" onclick="decodeBase64Map()">↓ Base64 맵 불러오기 (디코딩)</button>
+            <button onclick="encodeBase64Map()">↑ 작성한 맵을 Base64로 추출 (인코딩)</button>
+
+            <h2>2. 10진수 배열 (map.txt)</h2>
+            <textarea id="decArrayInput" placeholder="10진수 ID 배열..."></textarea>
+            <button onclick="loadFromDecArray()">10진수 배열 맵에 적용</button>
+
+            <div class="info-text">
+                * 스프라이트 이미지 직접 교체:<br>
+                <input type="file" id="imageLoader" accept="image/*" style="margin-top:5px; width:100%;">
+            </div>
+        </div>
+
+        <!-- 2. 실시간 에디터 -->
+        <div class="panel">
+            <h2>2. 실시간 맵 에디터 (25칸 표준)</h2>
+            <div class="status-box">
+                <span>현재 선택된 타일 ID: <strong id="selectedTileIdDisplay" style="color:#00FF66;">0</strong></span>
+                <canvas id="activeTilePreview" class="selected-preview" width="32" height="32"></canvas>
+            </div>
+            <div class="editor-container">
+                <canvas id="mapCanvas"></canvas>
+            </div>
+            <p class="info-text">💡 마우스 좌클릭/드래그: 설치 | 우클릭: 지우기(0)</p>
+        </div>
+
+        <!-- 3. 타일 팔레트 -->
+        <div class="panel">
+            <h2>3. 타일 팔레트 (32x32)</h2>
+            <p class="info-text">설치할 타일을 클릭하세요.</p>
+            <div class="palette-container">
+                <canvas id="paletteCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const TILE_SIZE = 32;
+        const MAP_WIDTH = 25;
+        let mapData = new Array(MAP_WIDTH * 20).fill(0);
+
+        let selectedTileId = 0;
+        let isMouseDown = false;
+        let activeMouseButton = 0;
+
+        const mapCanvas = document.getElementById('mapCanvas');
+        const mapCtx = mapCanvas.getContext('2d');
+        const paletteCanvas = document.getElementById('paletteCanvas');
+        const paletteCtx = paletteCanvas.getContext('2d');
+        const activeTilePreview = document.getElementById('activeTilePreview');
+        const previewCtx = activeTilePreview.getContext('2d');
+
+        const tileSheet = new Image();
+        tileSheet.src = 'tile_sheet.png';
+
+        tileSheet.onload = () => {
+            initPalette();
+            renderMap();
+            updatePreview();
+        };
+
+        document.getElementById('imageLoader').addEventListener('change', (e) => {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                tileSheet.src = event.target.result;
+            };
+            reader.readAsDataURL(e.target.files[0]);
+        });
+
+        function initPalette() {
+            paletteCanvas.width = tileSheet.width;
+            paletteCanvas.height = tileSheet.height;
+
+            paletteCtx.drawImage(tileSheet, 0, 0);
+
+            const cols = Math.floor(tileSheet.width / TILE_SIZE);
+            const rows = Math.floor(tileSheet.height / TILE_SIZE);
+
+            paletteCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            for (let r = 0; r <= rows; r++) {
+                paletteCtx.beginPath();
+                paletteCtx.moveTo(0, r * TILE_SIZE);
+                paletteCtx.lineTo(tileSheet.width, r * TILE_SIZE);
+                paletteCtx.stroke();
+            }
+            for (let c = 0; c <= cols; c++) {
+                paletteCtx.beginPath();
+                paletteCtx.moveTo(c * TILE_SIZE, 0);
+                paletteCtx.lineTo(c * TILE_SIZE, tileSheet.height);
+                paletteCtx.stroke();
+            }
+        }
+
+        paletteCanvas.addEventListener('click', (e) => {
+            const rect = paletteCanvas.getBoundingClientRect();
+            const col = Math.floor((e.clientX - rect.left) / TILE_SIZE);
+            const row = Math.floor((e.clientY - rect.top) / TILE_SIZE);
+            const colsInSheet = Math.floor(tileSheet.width / TILE_SIZE);
+
+            selectedTileId = row * colsInSheet + col;
+            document.getElementById('selectedTileIdDisplay').innerText = selectedTileId;
+            updatePreview();
+        });
+
+        function updatePreview() {
+            previewCtx.clearRect(0, 0, 32, 32);
+            if (selectedTileId === 0) return;
+
+            const colsInSheet = Math.floor(tileSheet.width / TILE_SIZE);
+            const sx = (selectedTileId % colsInSheet) * TILE_SIZE;
+            const sy = Math.floor(selectedTileId / colsInSheet) * TILE_SIZE;
+
+            previewCtx.drawImage(tileSheet, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, 32, 32);
+        }
+
+        function renderMap() {
+            const cols = MAP_WIDTH;
+            const rows = Math.ceil(mapData.length / cols);
+
+            mapCanvas.width = cols * TILE_SIZE;
+            mapCanvas.height = rows * TILE_SIZE;
+
+            mapCtx.clearRect(0, 0, mapCanvas.width, mapCanvas.height);
+
+            const colsInSheet = Math.floor(tileSheet.width / TILE_SIZE);
+
+            for (let i = 0; i < mapData.length; i++) {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                const dx = col * TILE_SIZE;
+                const dy = row * TILE_SIZE;
+                const tileId = mapData[i];
+
+                mapCtx.strokeStyle = '#222222';
+                mapCtx.strokeRect(dx, dy, TILE_SIZE, TILE_SIZE);
+
+                if (tileId > 0 && tileSheet.complete) {
+                    const sx = (tileId % colsInSheet) * TILE_SIZE;
+                    const sy = Math.floor(tileId / colsInSheet) * TILE_SIZE;
+                    mapCtx.drawImage(tileSheet, sx, sy, TILE_SIZE, TILE_SIZE, dx, dy, TILE_SIZE, TILE_SIZE);
+                }
+            }
+        }
+
+        function applyTileAtMouse(e) {
+            const rect = mapCanvas.getBoundingClientRect();
+            const col = Math.floor((e.clientX - rect.left) / TILE_SIZE);
+            const row = Math.floor((e.clientY - rect.top) / TILE_SIZE);
+
+            if (col < 0 || col >= MAP_WIDTH || row < 0) return;
+
+            const index = row * MAP_WIDTH + col;
+            while (index >= mapData.length) mapData.push(0);
+
+            const targetTile = (activeMouseButton === 2) ? 0 : selectedTileId;
+
+            if (mapData[index] !== targetTile) {
+                mapData[index] = targetTile;
+                renderMap();
+                updateDecArrayText();
+            }
+        }
+
+        mapCanvas.addEventListener('mousedown', (e) => {
+            isMouseDown = true;
+            activeMouseButton = e.button;
+            applyTileAtMouse(e);
+        });
+
+        mapCanvas.addEventListener('mousemove', (e) => { if (isMouseDown) applyTileAtMouse(e); });
+        window.addEventListener('mouseup', () => { isMouseDown = false; });
+        mapCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        function decodeBase64Map() {
+            try {
+                const b64 = document.getElementById('base64Input').value.trim().replace(/\s+/g, '');
+                if (!b64) return alert("Base64 문자열을 입력해주세요.");
+
+                const binaryStr = atob(b64);
+                const bytes = new Uint8Array(binaryStr.length);
+                for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+                const decompressed = pako.ungzip(bytes);
+                const view = new DataView(decompressed.buffer);
+
+                mapData = [];
+                for (let i = 0; i < decompressed.length; i += 4) {
+                    mapData.push(view.getUint32(i, true));
+                }
+
+                updateDecArrayText();
+                renderMap();
+            } catch (e) {
+                alert("디코딩 실패: 데이터 형식을 확인하세요.");
+            }
+        }
+
+        function encodeBase64Map() {
+            if (mapData.length === 0) return;
+
+            try {
+                const buffer = new ArrayBuffer(mapData.length * 4);
+                const view = new DataView(buffer);
+                for (let i = 0; i < mapData.length; i++) {
+                    view.setUint32(i * 4, mapData[i], true);
+                }
+
+                const compressed = pako.gzip(new Uint8Array(buffer));
+                let binaryStr = '';
+                for (let i = 0; i < compressed.length; i++) binaryStr += String.fromCharCode(compressed[i]);
+
+                document.getElementById('base64Input').value = btoa(binaryStr);
+                alert("Base64 추출 완료!");
+            } catch (e) {
+                alert("인코딩 실패: " + e.message);
+            }
+        }
+
+        function updateDecArrayText() {
+            let text = "";
+            for (let i = 0; i < mapData.length; i++) {
+                text += mapData[i] + " ";
+                if ((i + 1) % MAP_WIDTH === 0) text += "\n";
+            }
+            document.getElementById('decArrayInput').value = text.trim();
+        }
+
+        function loadFromDecArray() {
+            const rawText = document.getElementById('decArrayInput').value.trim();
+            if (!rawText) return;
+            mapData = rawText.split(/\s+/).map(Number);
+            renderMap();
+        }
+
+        renderMap();
+    </script>
+</body>
+</html>
